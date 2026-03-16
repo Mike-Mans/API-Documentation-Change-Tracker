@@ -1,0 +1,19 @@
+[package]
+name = "apisentinel"
+version = "0.1.0"
+edition = "2021"
+description = "API Sentinel – monitors API documentation and DNS infrastructure changes"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+similar = "2"
+indexmap = { version = "2", features = ["serde"] }
+anyhow = "1"
