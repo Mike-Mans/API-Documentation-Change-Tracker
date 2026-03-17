@@ -1,4 +1,5 @@
 mod alerts;
+mod bot_stop;
 mod config;
 mod database;
 mod dns_monitor;

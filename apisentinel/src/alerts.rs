@@ -1,3 +1,4 @@
+use crate::bot_stop;
 use std::fmt;
 use tracing::warn;
 
@@ -8,6 +9,21 @@ pub enum AlertType {
     DnsAnswerChange,
     DnsTtlChange,
     DnsDelegationChange,
+}
+
+impl AlertType {
+    /// Returns true for alert types that require the trading bot to be stopped
+    /// immediately: API doc changes or server relocation (DNS answer/delegation).
+    /// TTL-only changes are informational and do not trigger a stop.
+    fn requires_bot_stop(self) -> bool {
+        matches!(
+            self,
+            Self::DocRawChange
+                | Self::DocSemanticChange
+                | Self::DnsAnswerChange
+                | Self::DnsDelegationChange
+        )
+    }
 }
 
 impl fmt::Display for AlertType {
@@ -75,6 +91,9 @@ impl AlertManager {
         self.console_alert(alert);
         if self.slack_url.is_some() {
             self.slack_alert(alert);
+        }
+        if alert.alert_type.requires_bot_stop() {
+            bot_stop::stop_kalshi_bot(&alert.title);
         }
     }
 
