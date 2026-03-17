@@ -6,20 +6,23 @@ use tracing::warn;
 pub enum AlertType {
     DocRawChange,
     DocSemanticChange,
+    DocStableChange,
     DnsAnswerChange,
     DnsTtlChange,
     DnsDelegationChange,
+    ApiGeoRelocation,
 }
-
 
 impl fmt::Display for AlertType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DocRawChange => write!(f, "DOC_RAW_CHANGE"),
             Self::DocSemanticChange => write!(f, "DOC_SEMANTIC_CHANGE"),
+            Self::DocStableChange => write!(f, "DOC_STABLE_CHANGE"),
             Self::DnsAnswerChange => write!(f, "DNS_ANSWER_CHANGE"),
             Self::DnsTtlChange => write!(f, "DNS_TTL_CHANGE"),
             Self::DnsDelegationChange => write!(f, "DNS_DELEGATION_CHANGE"),
+            Self::ApiGeoRelocation => write!(f, "API_GEO_RELOCATION"),
         }
     }
 }
@@ -63,23 +66,26 @@ pub struct Alert {
 impl Alert {
     /// Whether this alert warrants stopping the trading bot immediately.
     ///
-    /// Rules:
-    ///  - DNS answer / delegation change → server relocation, always stop.
-    ///  - AsyncAPI (WebSocket) semantic change → always stop; the WS layer
-    ///    is what the bot uses for live market data and order updates.
-    ///  - OpenAPI semantic change at Medium or High severity → stop;
-    ///    covers endpoint removal, auth changes, schema / parameter changes.
-    ///  - Raw doc change (formatting / whitespace) → do NOT stop.
-    ///  - TTL-only DNS change → do NOT stop.
+    /// Triggers:
+    ///  - ApiGeoRelocation — the API server moved datacenters; VPS must follow.
+    ///  - DnsDelegationChange — NS records changed for the core domain (not docs CDN).
+    ///  - DocSemanticChange on AsyncAPI — WebSocket layer the bot depends on.
+    ///  - DocSemanticChange on OpenAPI at Medium/High — endpoint removal, auth, schema.
+    ///
+    /// Not triggers:
+    ///  - DnsAnswerChange — IP rotation is normal (CDN, load balancing); geo check handles this.
+    ///  - DnsTtlChange — informational only.
+    ///  - DocRawChange — whitespace/formatting, no semantic impact.
     pub fn should_stop_bot(&self) -> bool {
         match self.alert_type {
-            AlertType::DnsAnswerChange | AlertType::DnsDelegationChange => true,
-            AlertType::DocSemanticChange => {
-                // WebSocket spec changes always affect the bot.
-                // REST API changes only matter if they break existing behaviour.
-                self.source.contains("asyncapi")
-                    || self.severity != Severity::Low
-            }
+            // Confirmed stable doc change: same new hash for 5 consecutive cycles.
+            // DocSemanticChange is informational only — the hash check is the real gate.
+            // Only stop on a confirmed-stable HIGH-severity structural change.
+            // Medium/Low (e.g. new endpoint added, param tweak) — alert only, no stop.
+            AlertType::DocStableChange => self.severity == Severity::High,
+            // Server relocation signals.
+            AlertType::ApiGeoRelocation => true,
+            AlertType::DnsDelegationChange => self.source != "docs.kalshi.com",
             _ => false,
         }
     }
@@ -87,11 +93,10 @@ impl Alert {
     /// Human-readable reason passed into the stop notification.
     pub fn stop_reason(&self) -> &str {
         match self.alert_type {
-            AlertType::DnsAnswerChange | AlertType::DnsDelegationChange => "Server relocation",
-            AlertType::DocSemanticChange if self.source.contains("asyncapi") => {
-                "API docs changed (WebSocket)"
-            }
-            _ => "API docs changed",
+            AlertType::DocStableChange => "API docs changed (confirmed stable over 5 cycles)",
+            AlertType::ApiGeoRelocation => "Server relocation (datacenter change)",
+            AlertType::DnsDelegationChange => "Server relocation (DNS delegation change)",
+            _ => "Unknown",
         }
     }
 }

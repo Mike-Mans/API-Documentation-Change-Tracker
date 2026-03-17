@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS dns_events (
     created_at TEXT    NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS geo_baselines (
+    host       TEXT PRIMARY KEY,
+    data       TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_doc_url         ON doc_snapshots(url);
 CREATE INDEX IF NOT EXISTS idx_doc_url_fetched ON doc_snapshots(url, fetched_at);
 CREATE INDEX IF NOT EXISTS idx_dns_host        ON dns_snapshots(host, resolver, record_type);
@@ -194,6 +200,66 @@ impl Database {
                     additional: row.get(8)?,
                 }))
             }
+            None => Ok(None),
+        }
+    }
+
+    // ── Doc hash history ──
+
+    /// Return the most recent `n` semantic hashes for a URL, newest first.
+    /// Entries are `Option<String>` — non-spec docs store NULL.
+    pub fn recent_semantic_hashes(&self, url: &str, n: usize) -> SqlResult<Vec<Option<String>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT semantic_hash FROM doc_snapshots WHERE url = ?1
+             ORDER BY fetched_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![url, n as i64], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    /// Return the most recent `n` SHA256 hashes for a URL, newest first.
+    pub fn recent_doc_hashes(&self, url: &str, n: usize) -> SqlResult<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sha256 FROM doc_snapshots WHERE url = ?1
+             ORDER BY fetched_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![url, n as i64], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    // ── Geo baselines ──
+
+    pub fn get_geo_baseline(&self, host: &str) -> SqlResult<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT data FROM geo_baselines WHERE host = ?1",
+        )?;
+        let mut rows = stmt.query(params![host])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_geo_baseline(&self, host: &str, data: &str) -> SqlResult<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO geo_baselines (host, data, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(host) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+            params![host, data, now],
+        )?;
+        Ok(())
+    }
+
+    /// Return the severity string from the most recent DOC_SEMANTIC_CHANGE diff for a URL.
+    pub fn latest_semantic_diff_severity(&self, url: &str) -> SqlResult<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT severity FROM doc_diffs
+             WHERE url = ?1 AND diff_type = 'DOC_SEMANTIC_CHANGE'
+             ORDER BY created_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![url])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
             None => Ok(None),
         }
     }

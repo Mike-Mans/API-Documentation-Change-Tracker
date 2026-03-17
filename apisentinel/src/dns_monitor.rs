@@ -85,9 +85,10 @@ impl<'a> DnsMonitor<'a> {
             return Ok(());
         };
 
-        // Compare answers
-        let mut old_answers = prev.answers.clone();
-        let mut new_answers = parsed.answers.clone();
+        // Compare answers — normalize out TTL so a TTL-only change doesn't
+        // fire DNS_ANSWER_CHANGE (that's what DNS_TTL_CHANGE is for).
+        let mut old_answers: Vec<String> = prev.answers.iter().map(|a| strip_ttl(a)).collect();
+        let mut new_answers: Vec<String> = parsed.answers.iter().map(|a| strip_ttl(a)).collect();
         old_answers.sort();
         new_answers.sort();
 
@@ -179,21 +180,13 @@ impl<'a> DnsMonitor<'a> {
 
         if let Some(prev) = previous {
             if prev.answers != vec![stdout.clone()] {
-                self.alerts.emit(&Alert {
-                    alert_type: AlertType::DnsDelegationChange,
-                    severity: Severity::High,
-                    title: format!("Possible infrastructure change: trace path changed for {host}"),
-                    details: "dig +trace output differs from previous run. Inspect DNS delegation chain.".into(),
-                    source: host.to_string(),
-                });
-
-                self.db.insert_dns_event(
+                // Trace output varies naturally (TTL decay, different Anycast nodes per run).
+                // Log the difference for reference but do NOT emit an alert — real IP
+                // changes are already caught by the A/AAAA record checks via 3 resolvers.
+                tracing::info!(
                     host,
-                    "DNS_DELEGATION_CHANGE",
-                    Some("(previous trace)"),
-                    Some("(new trace)"),
-                    Severity::High.as_str(),
-                )?;
+                    "dig +trace output changed (stored in DB for reference)"
+                );
             }
         }
 
@@ -220,6 +213,20 @@ struct ParsedDig {
     ttl: Option<i64>,
     authority: Option<String>,
     additional: Option<String>,
+}
+
+/// Strip the TTL field from a DNS record string so answer comparison
+/// ignores natural TTL decay. Format: "name TTL class type data..."
+fn strip_ttl(record: &str) -> String {
+    let parts: Vec<&str> = record.split_whitespace().collect();
+    if parts.len() >= 2 {
+        // Reconstruct as "name class type data..." (drop index 1 = TTL)
+        let mut out = vec![parts[0]];
+        out.extend_from_slice(&parts[2..]);
+        out.join(" ")
+    } else {
+        record.to_string()
+    }
 }
 
 fn parse_dig_output(raw: &str) -> ParsedDig {

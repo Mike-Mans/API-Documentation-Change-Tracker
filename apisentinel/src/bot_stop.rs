@@ -82,7 +82,7 @@ fn send_imessage_alerts(reason: &str) {
     };
 
     for phone in ALERT_RECIPIENTS {
-        let url = format!("{bb_url}/api/v1/message/text?password={bb_password}");
+        let url = format!("{bb_url}/api/v1/message/text");
         let temp_guid = format!(
             "sentinel-{}-{}",
             Utc::now().timestamp_millis(),
@@ -95,7 +95,7 @@ fn send_imessage_alerts(reason: &str) {
             "tempGuid": temp_guid
         });
 
-        match client.post(&url).json(&body).send() {
+        match client.post(&url).query(&[("password", &bb_password)]).json(&body).send() {
             Ok(resp) if resp.status().is_success() => {
                 info!(recipient = phone, "iMessage alert sent via BlueBubbles");
             }

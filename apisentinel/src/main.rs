@@ -4,6 +4,8 @@ mod config;
 mod database;
 mod dns_monitor;
 mod docs_monitor;
+mod geo_monitor;
+mod latency_monitor;
 mod openapi_diff;
 
 use alerts::AlertManager;
@@ -11,12 +13,16 @@ use config::Config;
 use database::Database;
 use dns_monitor::DnsMonitor;
 use docs_monitor::DocsMonitor;
+use geo_monitor::GeoMonitor;
+use latency_monitor::{LatencyMonitor, PollMode};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{error, info};
 
+const NORMAL_INTERVAL_SECS: u64 = 600; // 10 min
+const WATCH_INTERVAL_SECS:  u64 = 180; //  3 min
+
 fn main() {
-    // Initialize structured logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -39,17 +45,21 @@ fn main() {
 
     let alert_mgr = AlertManager::new(cfg.slack_webhook_url.clone());
 
+    // LatencyMonitor holds mutable watch-mode state — lives outside the loop.
+    let mut latency_monitor = LatencyMonitor::new(&db, &alert_mgr);
+
     info!(
-        poll_interval_secs = cfg.poll_interval_secs,
-        trace_interval_secs = cfg.trace_interval_secs,
+        poll_interval_secs = NORMAL_INTERVAL_SECS,
+        watch_interval_secs = WATCH_INTERVAL_SECS,
         "scheduler configured"
     );
 
     let mut last_trace = Instant::now() - Duration::from_secs(cfg.trace_interval_secs + 1);
+    let mut poll_interval_secs = NORMAL_INTERVAL_SECS;
 
     loop {
         let cycle_start = Instant::now();
-        info!("=== starting monitoring cycle ===");
+        info!(poll_interval_secs, "=== starting monitoring cycle ===");
 
         // 1. Documentation checks
         {
@@ -57,7 +67,20 @@ fn main() {
             monitor.check_all(config::DOCS);
         }
 
-        // 2. DNS checks
+        // 2. Latency check — may switch to 3-min watch mode
+        let mode = latency_monitor.check();
+        poll_interval_secs = match mode {
+            PollMode::Normal => NORMAL_INTERVAL_SECS,
+            PollMode::Watch  => WATCH_INTERVAL_SECS,
+        };
+
+        // 3. Infrastructure (hosting provider / AWS region) check
+        {
+            let monitor = GeoMonitor::new(&db, &alert_mgr);
+            monitor.check();
+        }
+
+        // 4. DNS checks
         {
             let resolver_refs: Vec<&str> = config::RESOLVERS.iter().copied().collect();
             let monitor = DnsMonitor::new(&db, &alert_mgr, &resolver_refs);
@@ -73,8 +96,7 @@ fn main() {
         let elapsed = cycle_start.elapsed();
         info!(elapsed_secs = elapsed.as_secs(), "monitoring cycle complete");
 
-        // Sleep until next interval
-        let sleep_dur = Duration::from_secs(cfg.poll_interval_secs).saturating_sub(elapsed);
+        let sleep_dur = Duration::from_secs(poll_interval_secs).saturating_sub(elapsed);
         if !sleep_dur.is_zero() {
             info!(sleep_secs = sleep_dur.as_secs(), "sleeping until next cycle");
             thread::sleep(sleep_dur);
