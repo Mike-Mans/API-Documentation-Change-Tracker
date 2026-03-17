@@ -11,20 +11,6 @@ pub enum AlertType {
     DnsDelegationChange,
 }
 
-impl AlertType {
-    /// Returns true for alert types that require the trading bot to be stopped
-    /// immediately: API doc changes or server relocation (DNS answer/delegation).
-    /// TTL-only changes are informational and do not trigger a stop.
-    fn requires_bot_stop(self) -> bool {
-        matches!(
-            self,
-            Self::DocRawChange
-                | Self::DocSemanticChange
-                | Self::DnsAnswerChange
-                | Self::DnsDelegationChange
-        )
-    }
-}
 
 impl fmt::Display for AlertType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -74,6 +60,42 @@ pub struct Alert {
     pub source: String,
 }
 
+impl Alert {
+    /// Whether this alert warrants stopping the trading bot immediately.
+    ///
+    /// Rules:
+    ///  - DNS answer / delegation change → server relocation, always stop.
+    ///  - AsyncAPI (WebSocket) semantic change → always stop; the WS layer
+    ///    is what the bot uses for live market data and order updates.
+    ///  - OpenAPI semantic change at Medium or High severity → stop;
+    ///    covers endpoint removal, auth changes, schema / parameter changes.
+    ///  - Raw doc change (formatting / whitespace) → do NOT stop.
+    ///  - TTL-only DNS change → do NOT stop.
+    pub fn should_stop_bot(&self) -> bool {
+        match self.alert_type {
+            AlertType::DnsAnswerChange | AlertType::DnsDelegationChange => true,
+            AlertType::DocSemanticChange => {
+                // WebSocket spec changes always affect the bot.
+                // REST API changes only matter if they break existing behaviour.
+                self.source.contains("asyncapi")
+                    || self.severity != Severity::Low
+            }
+            _ => false,
+        }
+    }
+
+    /// Human-readable reason passed into the stop notification.
+    pub fn stop_reason(&self) -> &str {
+        match self.alert_type {
+            AlertType::DnsAnswerChange | AlertType::DnsDelegationChange => "Server relocation",
+            AlertType::DocSemanticChange if self.source.contains("asyncapi") => {
+                "API docs changed (WebSocket)"
+            }
+            _ => "API docs changed",
+        }
+    }
+}
+
 pub struct AlertManager {
     slack_url: Option<String>,
     client: reqwest::blocking::Client,
@@ -92,8 +114,8 @@ impl AlertManager {
         if self.slack_url.is_some() {
             self.slack_alert(alert);
         }
-        if alert.alert_type.requires_bot_stop() {
-            bot_stop::stop_kalshi_bot(&alert.title);
+        if alert.should_stop_bot() {
+            bot_stop::stop_kalshi_bot(alert.stop_reason());
         }
     }
 
